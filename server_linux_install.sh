@@ -539,7 +539,18 @@ if [[ -f "server_config.toml" ]] && grep -q '"v.domain.com"' server_config.toml;
   echo -e "${YELLOW}${BOLD}Attention:${NC} Set your NS domain."
   read -r -p ">>> Enter your Domain (e.g. vpn.example.com): " USER_DOMAIN </dev/tty || true
   if [[ -n "${USER_DOMAIN:-}" ]]; then
-    sed -i -E "s|^DOMAIN[[:space:]]*=.*$|DOMAIN = [\"${USER_DOMAIN}\"]|" server_config.toml
+    # Strip carriage returns, zero-width characters, non-ASCII bytes, and any
+    # character that is not a valid hostname character (alphanumeric, dot, hyphen).
+    # This prevents 0xd8 (Arabic/Persian keyboard input) and similar non-ASCII
+    # bytes from corrupting the TOML file with an "invalid UTF-8 byte" parse error.
+    USER_DOMAIN="$(printf '%s' "${USER_DOMAIN}" \
+      | tr -d '\r' \
+      | LC_ALL=C tr -cd '[:alnum:].-')"
+    if [[ -n "${USER_DOMAIN:-}" ]]; then
+      sed -i -E "s|^DOMAIN[[:space:]]*=.*$|DOMAIN = [\"${USER_DOMAIN}\"]|" server_config.toml
+    else
+      log_warn "Domain input was empty after sanitization. Edit server_config.toml manually."
+    fi
   fi
 fi
 
