@@ -281,6 +281,8 @@ func (c *Client) ProcessDNSQuery(query []byte, addr net.Addr, respond func([]byt
 	question := lite.FirstQuestion
 	now := time.Now()
 
+	c.triggerPrefetch(question.Name)
+
 	// 2. Check Local Cache
 	if c.localDNSCache != nil {
 		key := dnsCache.BuildKey(question.Name, question.Type, question.Class)

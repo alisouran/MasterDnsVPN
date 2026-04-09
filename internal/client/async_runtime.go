@@ -378,6 +378,18 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	c.asyncWG.Add(1)
 	go c.asyncStreamCleanupWorker(runtimeCtx)
 
+	// 10. Predictive DNS prefetch worker pool.
+	if c.prefetchEnabled {
+		workers := c.cfg.EffectivePrefetchWorkers()
+		for i := 0; i < workers; i++ {
+			c.asyncWG.Add(1)
+			go c.prefetchWorker(runtimeCtx, i)
+		}
+		c.asyncWG.Add(1)
+		go c.prefetchCleanupWorker(runtimeCtx)
+		c.log.Infof("🔮 <cyan>Predictive DNS prefetch enabled: <green>%d workers</green></cyan>", workers)
+	}
+
 	started = true
 	return nil
 }

@@ -134,6 +134,12 @@ type Client struct {
 
 	// SOCKS5 brute-force rate limiter
 	socksRateLimit *socksRateLimiter
+
+	// Predictive DNS Prefetching
+	prefetchEnabled  bool
+	prefetchQueue    chan string
+	prefetchRecentMu prefetchRecentMuType
+	prefetchRecent   map[string]time.Time
 }
 
 // clientStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -300,6 +306,11 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		orphanQueue:            mlq.New[VpnProto.Packet](cfg.EffectiveOrphanQueueInitialCapacity()),
 		sessionResetSignal:     make(chan struct{}, 1),
 		socksRateLimit:         newSocksRateLimiter(),
+
+		// Predictive DNS Prefetching
+		prefetchEnabled: cfg.PredictivePrefetchEnabled,
+		prefetchQueue:   make(chan string, max(64, cfg.EffectivePrefetchWorkers()*16)),
+		prefetchRecent:  make(map[string]time.Time),
 	}
 
 	if c.streamResolverFailoverResendThreshold < 1 {
