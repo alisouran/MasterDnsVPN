@@ -81,6 +81,8 @@ type ClientConfig struct {
 	PingColdThresholdSeconds              float64           `toml:"PING_COLD_THRESHOLD_SECONDS"`
 	RXChannelSize                         int               `toml:"RX_CHANNEL_SIZE"`
 	UDPBatchSize                          int               `toml:"UDP_BATCH_SIZE"`
+	PredictivePrefetchEnabled             bool              `toml:"PREDICTIVE_PREFETCH_ENABLED"`
+	PredictivePrefetchWorkers             int               `toml:"PREDICTIVE_PREFETCH_WORKERS"`
 	DNSResponseFragmentTimeoutSeconds     float64           `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
 	SOCKSUDPAssociateReadTimeoutSeconds   float64           `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
 	ClientTerminalStreamRetentionSeconds  float64           `toml:"CLIENT_TERMINAL_STREAM_RETENTION_SECONDS"`
@@ -181,6 +183,8 @@ func defaultClientConfig() ClientConfig {
 		PingColdThresholdSeconds:              20.0,
 		RXChannelSize:                         4096,
 		UDPBatchSize:                          32,
+		PredictivePrefetchEnabled:             false,
+		PredictivePrefetchWorkers:             2,
 		DNSResponseFragmentTimeoutSeconds:     10.0,
 		SOCKSUDPAssociateReadTimeoutSeconds:   30.0,
 		ClientTerminalStreamRetentionSeconds:  45.0,
@@ -387,6 +391,7 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.PingColdThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingColdThresholdSeconds, 20.0), cfg.PingCoolThresholdSeconds, 3600.0)
 	cfg.RXChannelSize = clampInt(defaultIntBelow(cfg.RXChannelSize, 1, 4096), 64, 65536)
 	cfg.UDPBatchSize = clampInt(defaultIntBelow(cfg.UDPBatchSize, 1, 32), 1, 256)
+	cfg.PredictivePrefetchWorkers = clampInt(defaultIntBelow(cfg.PredictivePrefetchWorkers, 1, 2), 1, 8)
 	cfg.DNSResponseFragmentTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.DNSResponseFragmentTimeoutSeconds, 10.0), 1.0, 600.0)
 	cfg.SOCKSUDPAssociateReadTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.SOCKSUDPAssociateReadTimeoutSeconds, 30.0), 1.0, 3600.0)
 	cfg.ClientTerminalStreamRetentionSeconds = clampFloat(defaultFloatAtMostZero(cfg.ClientTerminalStreamRetentionSeconds, 45.0), 1.0, 3600.0)
@@ -601,6 +606,10 @@ func (c ClientConfig) EffectiveDNSResponseFragmentStoreCap() int {
 
 func (c ClientConfig) EffectiveUDPBatchSize() int {
 	return clampInt(defaultIntBelow(c.UDPBatchSize, 1, 32), 1, 256)
+}
+
+func (c ClientConfig) EffectivePrefetchWorkers() int {
+	return clampInt(defaultIntBelow(c.PredictivePrefetchWorkers, 1, 2), 1, 8)
 }
 
 func (c ClientConfig) EffectiveRXChannelSize() int {

@@ -343,6 +343,10 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 
 	c.log.Infof("🔌 <green>New %s TCP CONNECT to <cyan>%s:%d</cyan>, Stream ID: <cyan>%d</cyan></green>", socksLabel, addr, port, streamID)
 
+	if atyp == SOCKS5_ATYP_DOMAIN {
+		c.triggerPrefetch(addr)
+	}
+
 	var targetPayload []byte
 	targetPayload = append(targetPayload, atyp)
 	switch atyp {

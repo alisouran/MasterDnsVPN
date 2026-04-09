@@ -97,6 +97,18 @@ LOCAL_DNS_CACHE_PERSIST_TO_FILE = true
 # Flush interval for persisted local DNS cache.
 LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 
+# Predictive DNS Prefetching
+# When enabled, the client intercepts SOCKS5 CONNECT and Local DNS requests and
+# proactively resolves known CDN / asset domains (e.g. ytimg.com when youtube.com
+# is seen) before the browser asks for them. Results are injected directly into
+# LOCAL_DNS_CACHE, eliminating the DNS RTT for those follow-up lookups.
+# No extra server-side changes required — uses the existing ARQ DNS pipeline.
+PREDICTIVE_PREFETCH_ENABLED = false
+
+# Number of background goroutines that dispatch prefetch queries through the tunnel.
+# Range: 1–8. Default: 2.
+PREDICTIVE_PREFETCH_WORKERS = 2
+
 # ------------------------------------------------------------------------------
 # 4) Resolver Selection, Duplication, and Health
 # What this section does:
