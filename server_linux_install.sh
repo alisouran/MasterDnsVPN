@@ -61,28 +61,28 @@ select_release_artifact() {
   case "$arch" in
     aarch64|arm64)
       if [[ $legacy -eq 1 ]]; then
-        URL="https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux-Legacy_ARM64.zip"
+        URL="https://github.com/alisouran/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux-Legacy_ARM64.zip"
         PREFIX="MasterDnsVPN_Server_Linux-Legacy_ARM64"
       else
-        URL="https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip"
+        URL="https://github.com/alisouran/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARM64.zip"
         PREFIX="MasterDnsVPN_Server_Linux_ARM64"
       fi
       ;;
     armv7l|armv7|armhf)
-      URL="https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARMV7.zip"
+      URL="https://github.com/alisouran/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_ARMV7.zip"
       PREFIX="MasterDnsVPN_Server_Linux_ARMV7"
       ;;
     x86_64|amd64)
       if [[ $legacy -eq 1 ]]; then
-        URL="https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux-Legacy_AMD64.zip"
+        URL="https://github.com/alisouran/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux-Legacy_AMD64.zip"
         PREFIX="MasterDnsVPN_Server_Linux-Legacy_AMD64"
       else
-        URL="https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip"
+        URL="https://github.com/alisouran/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_AMD64.zip"
         PREFIX="MasterDnsVPN_Server_Linux_AMD64"
       fi
       ;;
     i386|i486|i586|i686|x86)
-      URL="https://github.com/masterking32/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_X86.zip"
+      URL="https://github.com/alisouran/MasterDnsVPN/releases/latest/download/MasterDnsVPN_Server_Linux_X86.zip"
       PREFIX="MasterDnsVPN_Server_Linux_X86"
       ;;
     *)

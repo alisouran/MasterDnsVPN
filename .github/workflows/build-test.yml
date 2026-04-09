@@ -2,6 +2,11 @@ name: Build Only (Test/Go)
 
 on:
   workflow_dispatch: {}
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: write
@@ -300,7 +305,7 @@ jobs:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
         run: |
-          go build -ldflags "-X masterdnsvpn-go/internal/version.BuildVersion=${{ needs.preflight.outputs.release_tag }}" -o dist/MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/client
+          go build -ldflags "-s -w -X masterdnsvpn-go/internal/version.BuildVersion=${{ needs.preflight.outputs.release_tag }}" -o dist/MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/client
 
       - name: Build server
         env:
@@ -313,7 +318,7 @@ jobs:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
         run: |
-          go build -ldflags "-X masterdnsvpn-go/internal/version.BuildVersion=${{ needs.preflight.outputs.release_tag }}" -o dist/MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/server
+          go build -ldflags "-s -w -X masterdnsvpn-go/internal/version.BuildVersion=${{ needs.preflight.outputs.release_tag }}" -o dist/MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/server
 
       - name: Verify Linux-Legacy binaries are not dynamically linked
         if: ${{ matrix.platform == 'Linux-Legacy' }}
