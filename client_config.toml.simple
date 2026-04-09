@@ -112,8 +112,20 @@ LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 # 2 = Round Robin
 # 3 = Least Loss
 # 4 = Lowest Latency
-# Modes 3 and 4 use runtime feedback from sends/successes.
+# 5 = UCB1 Bandit (Multi-Armed Bandit reinforcement learning)
+#     Recommended for censored/DPI environments. Automatically balances
+#     exploitation (using the best resolver) with exploration (probing
+#     blocked resolvers to detect recovery). Uses runtime ARQ feedback.
+# Modes 3, 4, and 5 use runtime feedback from sends/successes/timeouts.
 RESOLVER_BALANCING_STRATEGY = 2
+
+# Exploration constant for the UCB1 Bandit strategy (mode 5 only).
+# Controls the trade-off between exploitation and exploration:
+#   score = avg_reward + C * sqrt( ln(total_attempts) / resolver_attempts )
+# Higher values = more exploration of under-tested resolvers.
+# Lower values  = stronger preference for the current best resolver.
+# Default: sqrt(2) ~= 1.4142. Recommended range: 0.5 - 3.0.
+UCB1_EXPLORATION_CONSTANT = 1.4142
 
 # Duplicate each normal outgoing tunnel packet this many times.
 # Clamped in code to [1, 4].
@@ -228,6 +240,11 @@ DISPATCHER_IDLE_POLL_INTERVAL_SECONDS = 0.020
 
 # Channel sizes for async RX pipelines are auto-raised internally when needed.
 RX_CHANNEL_SIZE = 4096
+
+# Number of UDP packets fetched per recvmmsg syscall (ReadBatch).
+# Higher values reduce syscall overhead at high packet rates; lower values
+# reduce latency when traffic is sparse. Range: 1–256.
+UDP_BATCH_SIZE = 32
 
 # UDP connection pool size per resolver key.
 # Local UDP ASSOCIATE read timeout.

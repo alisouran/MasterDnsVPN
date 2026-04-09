@@ -11,6 +11,7 @@ package client
 
 import (
 	"encoding/binary"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ const (
 	BalancingRoundRobin        = 2
 	BalancingLeastLoss         = 3
 	BalancingLowestLatency     = 4
+	BalancingUCB1Bandit        = 5
 )
 
 type Connection struct {
@@ -99,6 +101,8 @@ type Balancer struct {
 
 	autoDisableEnabled       bool
 	autoDisableTimeoutWindow time.Duration
+
+	ucb1C float64 // UCB1 exploration constant; set via SetUCB1Config
 }
 
 type connectionStats struct {
@@ -145,6 +149,21 @@ func (b *Balancer) SetStreamFailoverConfig(threshold int, cooldown time.Duration
 	b.mu.Lock()
 	b.streamFailoverThreshold = threshold
 	b.streamFailoverCooldown = cooldown
+	b.mu.Unlock()
+}
+
+// SetUCB1Config configures the exploration constant for the UCB1 Bandit balancing strategy.
+// c is the exploration constant C in: score = avg_reward + C * sqrt(ln(total_attempts) / resolver_attempts).
+// If c <= 0, math.Sqrt2 (≈1.4142) is used.
+func (b *Balancer) SetUCB1Config(c float64) {
+	if b == nil {
+		return
+	}
+	if c <= 0 {
+		c = math.Sqrt2
+	}
+	b.mu.Lock()
+	b.ucb1C = c
 	b.mu.Unlock()
 }
 
@@ -720,6 +739,8 @@ func (b *Balancer) GetBestConnection() (Connection, bool) {
 			return b.roundRobinBestConnectionLocked()
 		}
 		return b.bestScoredConnectionLocked(b.latencyScoreLocked)
+	case BalancingUCB1Bandit:
+		return b.bestUCB1ConnectionLocked()
 	default:
 		return b.roundRobinBestConnectionLocked()
 	}
@@ -753,6 +774,8 @@ func (b *Balancer) GetBestConnectionExcluding(excludeKey string) (Connection, bo
 			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
 		}
 		return b.bestScoredConnectionExcludingLocked(b.latencyScoreLocked, excludeKey)
+	case BalancingUCB1Bandit:
+		return b.bestUCB1ConnectionExcludingLocked(excludeKey)
 	default:
 		return b.roundRobinBestConnectionExcludingLocked(excludeKey)
 	}
@@ -1054,6 +1077,19 @@ func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {
 	switch b.strategy {
 	case BalancingRandom, BalancingRoundRobin, BalancingRoundRobinDefault:
 		return b.selectTargetByStrategyLocked()
+	}
+
+	// UCB1: select from top-10 by highest UCB1 score (maximise)
+	if b.strategy == BalancingUCB1Bandit {
+		topN := 10
+		if len(b.activeIDs) < topN {
+			topN = len(b.activeIDs)
+		}
+		pool := b.selectHighestScoreLocked(topN, b.ucb1ScoreLocked)
+		if len(pool) == 0 {
+			return b.selectTargetByStrategyLocked()
+		}
+		return pool[b.nextRandom()%uint64(len(pool))], true
 	}
 
 	var scorer func(int) uint64
@@ -1497,6 +1533,8 @@ func (b *Balancer) getUniqueConnectionsLocked(requiredCount int) []Connection {
 			return b.selectRoundRobinLocked(count)
 		}
 		return b.selectLowestScoreLocked(count, b.latencyScoreLocked)
+	case BalancingUCB1Bandit:
+		return b.selectHighestScoreLocked(count, b.ucb1ScoreLocked)
 	default:
 		return b.selectRoundRobinLocked(count)
 	}
@@ -1531,6 +1569,8 @@ func (b *Balancer) getBestConnectionExcludingLocked(excludeKey string) (Connecti
 			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
 		}
 		return b.bestScoredConnectionExcludingLocked(b.latencyScoreLocked, excludeKey)
+	case BalancingUCB1Bandit:
+		return b.bestUCB1ConnectionExcludingLocked(excludeKey)
 	default:
 		return b.roundRobinBestConnectionExcludingLocked(excludeKey)
 	}
@@ -1723,6 +1763,153 @@ func (b *Balancer) hasLatencySignalLocked() bool {
 		}
 	}
 	return false
+}
+
+// ucb1RewardLocked returns a normalized reward in [0, 1] for the resolver at idx.
+// It combines success rate (70%) and inverse latency (30%).
+// Called under b.mu.RLock().
+func (b *Balancer) ucb1RewardLocked(idx int) float64 {
+	if idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
+		return 0.5 // neutral reward for unknown
+	}
+	sent, acked, _, rttMicrosSum, rttCount := b.stats[idx].snapshot()
+	if sent == 0 {
+		return 0.5
+	}
+
+	successRate := float64(acked) / float64(sent)
+	if successRate > 1.0 {
+		successRate = 1.0
+	}
+
+	latencyReward := 0.5 // default when no RTT data yet
+	if rttCount > 0 {
+		avgRTTMicros := float64(rttMicrosSum) / float64(rttCount)
+		const maxRTTMicros = 2_000_000.0 // 2 seconds
+		latencyReward = 1.0 - math.Min(avgRTTMicros/maxRTTMicros, 1.0)
+	}
+
+	return 0.7*successRate + 0.3*latencyReward
+}
+
+// ucb1TotalSentLocked sums sent counts across all active resolvers.
+// Called under b.mu.RLock().
+func (b *Balancer) ucb1TotalSentLocked() uint64 {
+	var total uint64
+	for _, idx := range b.activeIDs {
+		if idx >= 0 && idx < len(b.stats) && b.stats[idx] != nil {
+			total += b.stats[idx].sent.Load()
+		}
+	}
+	return total
+}
+
+// ucb1ScoreLocked returns the UCB1 score for the resolver at idx.
+// Returns +Inf for unsampled resolvers (cold start guarantee).
+// Called under b.mu.RLock().
+func (b *Balancer) ucb1ScoreLocked(idx int) float64 {
+	if idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
+		return math.Inf(1) // cold start: always explore unsampled resolvers first
+	}
+	sent := b.stats[idx].sent.Load()
+	if sent == 0 {
+		return math.Inf(1)
+	}
+
+	totalSent := b.ucb1TotalSentLocked()
+	if totalSent == 0 {
+		return math.Inf(1)
+	}
+
+	c := b.ucb1C
+	if c <= 0 {
+		c = math.Sqrt2
+	}
+
+	avgReward := b.ucb1RewardLocked(idx)
+	exploration := c * math.Sqrt(math.Log(float64(totalSent))/float64(sent))
+	return avgReward + exploration
+}
+
+// bestUCB1ConnectionLocked returns the active connection with the highest UCB1 score.
+// Called under b.mu.RLock().
+func (b *Balancer) bestUCB1ConnectionLocked() (Connection, bool) {
+	if len(b.activeIDs) == 0 {
+		return Connection{}, false
+	}
+	bestIdx := -1
+	bestScore := math.Inf(-1)
+	for _, idx := range b.activeIDs {
+		score := b.ucb1ScoreLocked(idx)
+		if bestIdx == -1 || score > bestScore {
+			bestScore = score
+			bestIdx = idx
+		}
+	}
+	if bestIdx < 0 {
+		return Connection{}, false
+	}
+	return b.connections[bestIdx], true
+}
+
+// bestUCB1ConnectionExcludingLocked returns the active connection with the highest UCB1 score,
+// skipping the resolver identified by excludeKey.
+// Called under b.mu.RLock().
+func (b *Balancer) bestUCB1ConnectionExcludingLocked(excludeKey string) (Connection, bool) {
+	if len(b.activeIDs) == 0 {
+		return Connection{}, false
+	}
+	bestIdx := -1
+	bestScore := math.Inf(-1)
+	for _, idx := range b.activeIDs {
+		if b.connections[idx].Key == excludeKey {
+			continue
+		}
+		score := b.ucb1ScoreLocked(idx)
+		if bestIdx == -1 || score > bestScore {
+			bestScore = score
+			bestIdx = idx
+		}
+	}
+	if bestIdx < 0 {
+		return Connection{}, false
+	}
+	return b.connections[bestIdx], true
+}
+
+// selectHighestScoreLocked selects up to count active connections with the highest UCB1 scores.
+// Called under b.mu.RLock().
+func (b *Balancer) selectHighestScoreLocked(count int, scorer func(int) float64) []Connection {
+	n := len(b.activeIDs)
+	if count <= 0 || n == 0 {
+		return nil
+	}
+	if count > n {
+		count = n
+	}
+
+	type scored struct {
+		idx   int
+		score float64
+	}
+	candidates := make([]scored, n)
+	for i, idx := range b.activeIDs {
+		candidates[i] = scored{idx: idx, score: scorer(idx)}
+	}
+
+	// Partial selection sort: extract top `count` by descending score.
+	selected := make([]Connection, 0, count)
+	for i := 0; i < count; i++ {
+		bestPos := i
+		for j := i + 1; j < len(candidates); j++ {
+			if candidates[j].score > candidates[bestPos].score {
+				bestPos = j
+			}
+		}
+		candidates[i], candidates[bestPos] = candidates[bestPos], candidates[i]
+		selected = append(selected, b.connections[candidates[i].idx])
+	}
+	return selected
 }
 
 func (b *Balancer) lossScoreLocked(idx int) uint64 {

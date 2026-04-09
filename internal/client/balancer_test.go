@@ -184,3 +184,74 @@ func TestBalancerSetConnectionMTUUpdatesBalancerOnly(t *testing.T) {
 		t.Fatalf("expected snapshot MTUs to update, got up=%d chars=%d down=%d", got.UploadMTUBytes, got.UploadMTUChars, got.DownloadMTUBytes)
 	}
 }
+
+// TestBalancerUCB1SelectsUntriedResolverFirst verifies the cold-start guarantee:
+// a resolver that has never been sent a packet must be selected over one that has.
+func TestBalancerUCB1SelectsUntriedResolverFirst(t *testing.T) {
+	b := NewBalancer(BalancingUCB1Bandit, nil)
+	connections := []*Connection{
+		{Key: "a", IsValid: true},
+		{Key: "b", IsValid: true},
+		{Key: "c", IsValid: true},
+	}
+	b.SetConnections(connections)
+	_ = b.SetConnectionValidity("a", true)
+	_ = b.SetConnectionValidity("b", true)
+	_ = b.SetConnectionValidity("c", true)
+
+	// Simulate sends + successes for "a" and "b" only; "c" has zero attempts.
+	for i := 0; i < 10; i++ {
+		b.ReportSend("a")
+		b.ReportSuccess("a", 50*time.Millisecond)
+	}
+	for i := 0; i < 10; i++ {
+		b.ReportSend("b")
+		b.ReportSuccess("b", 100*time.Millisecond)
+	}
+
+	conn, ok := b.GetBestConnection()
+	if !ok {
+		t.Fatal("expected a connection to be returned")
+	}
+	if conn.Key != "c" {
+		t.Errorf("expected untried resolver 'c' to be selected (cold start), got %q", conn.Key)
+	}
+}
+
+// TestBalancerUCB1FavoursBetterRewardAfterWarmup verifies that after sufficient
+// observations the UCB1 balancer prefers the resolver with the higher success rate.
+func TestBalancerUCB1FavoursBetterRewardAfterWarmup(t *testing.T) {
+	b := NewBalancer(BalancingUCB1Bandit, nil)
+	b.SetUCB1Config(0.01) // near-zero exploration to force pure exploitation
+	connections := []*Connection{
+		{Key: "good", IsValid: true},
+		{Key: "bad", IsValid: true},
+	}
+	b.SetConnections(connections)
+	_ = b.SetConnectionValidity("good", true)
+	_ = b.SetConnectionValidity("bad", true)
+
+	// "good": 90% success rate over 100 sends
+	for i := 0; i < 100; i++ {
+		b.ReportSend("good")
+		if i < 90 {
+			b.ReportSuccess("good", 50*time.Millisecond)
+		}
+	}
+	// "bad": 20% success rate over 100 sends
+	for i := 0; i < 100; i++ {
+		b.ReportSend("bad")
+		if i < 20 {
+			b.ReportSuccess("bad", 50*time.Millisecond)
+		}
+	}
+
+	// With low exploration constant, the resolver with the better reward must win.
+	conn, ok := b.GetBestConnection()
+	if !ok {
+		t.Fatal("expected a connection to be returned")
+	}
+	if conn.Key != "good" {
+		t.Errorf("expected 'good' resolver to be preferred after warmup, got %q", conn.Key)
+	}
+}

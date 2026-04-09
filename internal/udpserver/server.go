@@ -20,6 +20,7 @@ import (
 	domainMatcher "masterdnsvpn-go/internal/domainmatcher"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/netutil"
 	"masterdnsvpn-go/internal/security"
 )
 
@@ -71,6 +72,7 @@ type Server struct {
 	streamOutboundMaxRetry   int
 	mtuProbePayloadPool      sync.Pool
 	packetPool               sync.Pool
+	udpPacketConn            netutil.BatchConn
 	deferredInflightMu       sync.Mutex
 	deferredInflight         map[uint64]struct{}
 	immediateConnectedLog    throttledLogState
@@ -274,6 +276,7 @@ func (s *Server) Run(ctx context.Context) error {
 	defer conn.Close()
 
 	s.configureSocketBuffers(conn)
+	s.udpPacketConn = netutil.NewBatchConn(conn)
 
 	s.log.Infof(
 		"\U0001F4E1 <green>UDP Listener Ready, Addr: <cyan>%s</cyan>, Readers: <cyan>%d</cyan>, Workers: <cyan>%d</cyan>, Queue: <cyan>%d</cyan></green>",
@@ -303,7 +306,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	readErrCh := make(chan error, s.cfg.EffectiveUDPReaders())
 	var readerWG sync.WaitGroup
-	s.startReaders(runCtx, conn, reqCh, readErrCh, &readerWG)
+	s.startReaders(runCtx, s.udpPacketConn, conn, reqCh, readErrCh, &readerWG)
 
 	readerWG.Wait()
 	close(reqCh)

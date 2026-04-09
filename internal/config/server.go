@@ -36,6 +36,7 @@ type ServerConfig struct {
 	DeferredSessionWorkers            int      `toml:"DEFERRED_SESSION_WORKERS"`
 	DeferredSessionQueueLimit         int      `toml:"DEFERRED_SESSION_QUEUE_LIMIT"`
 	MaxPacketSize                     int      `toml:"MAX_PACKET_SIZE"`
+	UDPBatchSize                      int      `toml:"UDP_BATCH_SIZE"`
 	DropLogIntervalSecs               float64  `toml:"DROP_LOG_INTERVAL_SECONDS"`
 	InvalidCookieWindowSecs           float64  `toml:"INVALID_COOKIE_WINDOW_SECONDS"`
 	InvalidCookieErrorThreshold       int      `toml:"INVALID_COOKIE_ERROR_THRESHOLD"`
@@ -114,6 +115,7 @@ func defaultServerConfig() ServerConfig {
 		DeferredSessionWorkers:            8,
 		DeferredSessionQueueLimit:         4096,
 		MaxPacketSize:                     65535,
+		UDPBatchSize:                      32,
 		DropLogIntervalSecs:               2.0,
 		InvalidCookieWindowSecs:           2.0,
 		InvalidCookieErrorThreshold:       10,
@@ -228,6 +230,8 @@ func finalizeServerConfig(cfg ServerConfig) (ServerConfig, error) {
 	if cfg.UDPReaders <= 0 {
 		cfg.UDPReaders = defaultServerConfig().UDPReaders
 	}
+
+	cfg.UDPBatchSize = clampInt(defaultIntBelow(cfg.UDPBatchSize, 1, 32), 1, 256)
 
 	if cfg.SocketBufferSize <= 0 {
 		cfg.SocketBufferSize = 8 * 1024 * 1024
@@ -467,6 +471,10 @@ func (c ServerConfig) EffectiveUDPReaders() int {
 	}
 
 	return clampInt(max(c.UDPReaders, recommended), 1, 32)
+}
+
+func (c ServerConfig) EffectiveUDPBatchSize() int {
+	return clampInt(defaultIntBelow(c.UDPBatchSize, 1, 32), 1, 256)
 }
 
 func (c ServerConfig) EffectiveDNSRequestWorkers() int {

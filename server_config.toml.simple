@@ -56,6 +56,11 @@ SOCKET_BUFFER_SIZE = 8388608
 # Maximum packet buffer size allocated by the server packet pool.
 MAX_PACKET_SIZE = 65535
 
+# Number of UDP packets fetched per recvmmsg syscall (ReadBatch).
+# Higher values reduce syscall overhead at high packet rates; lower values
+# reduce latency when traffic is sparse. Range: 1–256.
+UDP_BATCH_SIZE = 32
+
 # Minimum interval between overload/drop logs.
 DROP_LOG_INTERVAL_SECONDS = 2.0
 

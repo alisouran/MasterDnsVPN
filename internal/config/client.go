@@ -10,6 +10,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -44,6 +45,7 @@ type ClientConfig struct {
 	LocalDNSCachePersist                  bool              `toml:"LOCAL_DNS_CACHE_PERSIST_TO_FILE"`
 	LocalDNSCacheFlushSec                 float64           `toml:"LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS"`
 	ResolverBalancingStrategy             int               `toml:"RESOLVER_BALANCING_STRATEGY"`
+	UCB1ExplorationConstant               float64           `toml:"UCB1_EXPLORATION_CONSTANT"`
 	PacketDuplicationCount                int               `toml:"PACKET_DUPLICATION_COUNT"`
 	SetupPacketDuplicationCount           int               `toml:"SETUP_PACKET_DUPLICATION_COUNT"`
 	StreamResolverFailoverResendThreshold int               `toml:"STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD"`
@@ -78,6 +80,7 @@ type ClientConfig struct {
 	PingCoolThresholdSeconds              float64           `toml:"PING_COOL_THRESHOLD_SECONDS"`
 	PingColdThresholdSeconds              float64           `toml:"PING_COLD_THRESHOLD_SECONDS"`
 	RXChannelSize                         int               `toml:"RX_CHANNEL_SIZE"`
+	UDPBatchSize                          int               `toml:"UDP_BATCH_SIZE"`
 	DNSResponseFragmentTimeoutSeconds     float64           `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
 	SOCKSUDPAssociateReadTimeoutSeconds   float64           `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
 	ClientTerminalStreamRetentionSeconds  float64           `toml:"CLIENT_TERMINAL_STREAM_RETENTION_SECONDS"`
@@ -144,6 +147,7 @@ func defaultClientConfig() ClientConfig {
 		LocalDNSCachePersist:                  true,
 		LocalDNSCacheFlushSec:                 60.0,
 		ResolverBalancingStrategy:             0,
+		UCB1ExplorationConstant:               math.Sqrt2,
 		PacketDuplicationCount:                5,
 		SetupPacketDuplicationCount:           5,
 		StreamResolverFailoverResendThreshold: 2,
@@ -176,6 +180,7 @@ func defaultClientConfig() ClientConfig {
 		PingCoolThresholdSeconds:              10.0,
 		PingColdThresholdSeconds:              20.0,
 		RXChannelSize:                         4096,
+		UDPBatchSize:                          32,
 		DNSResponseFragmentTimeoutSeconds:     10.0,
 		SOCKSUDPAssociateReadTimeoutSeconds:   30.0,
 		ClientTerminalStreamRetentionSeconds:  45.0,
@@ -319,9 +324,11 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 
 	cfg.CompressionMinSize = defaultIntBelow(cfg.CompressionMinSize, 100, compression.DefaultMinSize)
 
-	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 4 {
+	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 5 {
 		return cfg, fmt.Errorf("invalid RESOLVER_BALANCING_STRATEGY: %d", cfg.ResolverBalancingStrategy)
 	}
+
+	cfg.UCB1ExplorationConstant = clampFloat(defaultFloatAtMostZero(cfg.UCB1ExplorationConstant, math.Sqrt2), 0.1, 10.0)
 
 	cfg.PacketDuplicationCount = clampInt(defaultIntBelow(cfg.PacketDuplicationCount, 1, 1), 1, 4)
 	cfg.SetupPacketDuplicationCount = clampInt(defaultIntBelow(cfg.SetupPacketDuplicationCount, 1, max(2, cfg.PacketDuplicationCount)), cfg.PacketDuplicationCount, 5)
@@ -379,6 +386,7 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.PingCoolThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingCoolThresholdSeconds, 10.0), cfg.PingWarmThresholdSeconds, 1800.0)
 	cfg.PingColdThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingColdThresholdSeconds, 20.0), cfg.PingCoolThresholdSeconds, 3600.0)
 	cfg.RXChannelSize = clampInt(defaultIntBelow(cfg.RXChannelSize, 1, 4096), 64, 65536)
+	cfg.UDPBatchSize = clampInt(defaultIntBelow(cfg.UDPBatchSize, 1, 32), 1, 256)
 	cfg.DNSResponseFragmentTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.DNSResponseFragmentTimeoutSeconds, 10.0), 1.0, 600.0)
 	cfg.SOCKSUDPAssociateReadTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.SOCKSUDPAssociateReadTimeoutSeconds, 30.0), 1.0, 3600.0)
 	cfg.ClientTerminalStreamRetentionSeconds = clampFloat(defaultFloatAtMostZero(cfg.ClientTerminalStreamRetentionSeconds, 45.0), 1.0, 3600.0)
@@ -589,6 +597,10 @@ func (c ClientConfig) EffectiveDNSResponseFragmentStoreCap() int {
 		size += c.PacketDuplicationCount * c.MaxPacketsPerBatch * 4
 	}
 	return clampInt(size, 128, 2048)
+}
+
+func (c ClientConfig) EffectiveUDPBatchSize() int {
+	return clampInt(defaultIntBelow(c.UDPBatchSize, 1, 32), 1, 256)
 }
 
 func (c ClientConfig) EffectiveRXChannelSize() int {

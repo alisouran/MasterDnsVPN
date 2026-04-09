@@ -16,11 +16,14 @@ import (
 	"net"
 	"time"
 
+	"golang.org/x/net/ipv4"
+
 	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/client/handlers"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
+	"masterdnsvpn-go/internal/netutil"
 )
 
 const clientRXDropLogInterval = 2 * time.Second
@@ -757,18 +760,72 @@ func (c *Client) buildPlannedOutboundFrames(
 }
 
 // asyncWriterWorker sends already-built DNS packets on the assigned socket.
+// It drains the encodedTXChannel non-blocking after the first task to accumulate
+// a batch and flushes with a single WriteBatch (sendmmsg) syscall.
 func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPConn) {
 	defer c.asyncWG.Done()
 	c.log.Debugf("\U0001F680 <green>Writer Worker <cyan>#%d</cyan> started</green>", id)
-	var lastDeadline time.Time
+
 	localAddr := ""
 	if conn != nil && conn.LocalAddr() != nil {
 		localAddr = conn.LocalAddr().String()
 	}
+
+	pc := netutil.NewBatchConn(conn)
+	batchSz := c.udpBatchSize
+
+	// Per-frame metadata needed for TrackResolverSend after the batch write.
+	type frameMeta struct {
+		packet    []byte
+		addrStr   string
+		serverKey string
+		now       time.Time
+	}
+	// Pre-allocate goroutine-local slices; reset to [:0] each flush — no realloc.
+	batch := make([]ipv4.Message, 0, batchSz)
+	metas := make([]frameMeta, 0, batchSz)
+
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		_, _ = pc.WriteBatch(batch, 0)
+		for _, m := range metas {
+			c.balancer.TrackResolverSend(m.packet, m.addrStr, localAddr, m.serverKey, m.now, c.tunnelPacketTimeout)
+		}
+		batch = batch[:0]
+		metas = metas[:0]
+	}
+
+	addTask := func(task writerTask, now time.Time) {
+		for _, frame := range task.frames {
+			if frame.addr == nil || len(frame.packet) == 0 {
+				continue
+			}
+			batch = append(batch, ipv4.Message{
+				Buffers: [][]byte{frame.packet},
+				Addr:    frame.addr,
+			})
+			metas = append(metas, frameMeta{
+				packet:    frame.packet,
+				addrStr:   frame.addr.String(),
+				serverKey: frame.serverKey,
+				now:       now,
+			})
+		}
+		// Release the pre-encoding TX packet back to its pool. The encoded
+		// frame.packet bytes are a separate allocation and remain valid through WriteBatch.
+		if !task.wasPacked && task.selected != nil {
+			task.selected.ReleaseTXPacket(task.item)
+		}
+	}
+
 	refreshWindow := c.tunnelPacketTimeout / 2
 	if refreshWindow < 250*time.Millisecond {
 		refreshWindow = 250 * time.Millisecond
 	}
+	var lastDeadline time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -785,29 +842,30 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 					_ = conn.SetWriteDeadline(lastDeadline)
 				}
 			}
-			for _, frame := range task.frames {
-				if frame.addr == nil || len(frame.packet) == 0 {
-					continue
-				}
-				if _, err := conn.WriteToUDP(frame.packet, frame.addr); err == nil {
-					c.balancer.TrackResolverSend(
-						frame.packet,
-						frame.addr.String(),
-						localAddr,
-						frame.serverKey,
-						now,
-						c.tunnelPacketTimeout,
-					)
+			addTask(task, now)
+			// Drain additional ready tasks non-blocking to fill the batch.
+		drain:
+			for len(batch) < batchSz {
+				select {
+				case extra, ok := <-c.encodedTXChannel:
+					if !ok {
+						break drain
+					}
+					c.signalWriterQueueSpace()
+					addTask(extra, now)
+				default:
+					break drain
 				}
 			}
-			if !task.wasPacked && task.selected != nil {
-				task.selected.ReleaseTXPacket(task.item)
-			}
+			flushBatch()
 		}
 	}
 }
 
 // asyncReaderWorker reads raw UDP data and pushes to the rxChannel (Internal Queue).
+// Uses ReadBatch (recvmmsg) to fetch up to udpBatchSize packets per syscall, dramatically
+// reducing context switches at high packet rates. Buffers are swapped from udpBufferPool
+// so the hot path performs zero heap allocations.
 func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPConn) {
 	defer c.asyncWG.Done()
 	c.log.Debugf("\U0001F442 <green>Reader Worker <cyan>#%d</cyan> started</green>", id)
@@ -816,41 +874,61 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 		localAddr = conn.LocalAddr().String()
 	}
 
+	pc := netutil.NewBatchConn(conn)
+	batchSz := c.udpBatchSize
+
+	// Pre-allocate goroutine-local batch with pool buffers — never shared across goroutines.
+	msgs := make([]ipv4.Message, batchSz)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{c.getRuntimeUDPBuffer()}
+	}
+	defer func() {
+		// Return any buffers still held by the batch on goroutine exit.
+		for i := range msgs {
+			if len(msgs[i].Buffers) > 0 && msgs[i].Buffers[0] != nil {
+				c.putRuntimeUDPBuffer(msgs[i].Buffers[0])
+				msgs[i].Buffers[0] = nil
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			buf := c.udpBufferPool.Get().([]byte)
-			n, addr, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				c.udpBufferPool.Put(buf)
-				if ctx.Err() != nil {
-					return
-				}
+		}
+
+		n, err := pc.ReadBatch(msgs, 0)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			continue
+		}
+
+		for i := 0; i < n; i++ {
+			msgLen := msgs[i].N
+			msgs[i].N = 0
+			buf := msgs[i].Buffers[0]
+
+			// Discard packets that fail the minimum-length or QR-bit check.
+			// Buffer stays in its slot — it will be overwritten by the next ReadBatch.
+			if msgLen < 12 || (buf[2]&0x80) == 0 {
 				continue
 			}
 
-			if n < 12 { // Basic DNS header length
-				c.udpBufferPool.Put(buf)
-				continue
-			}
+			addr, _ := msgs[i].Addr.(*net.UDPAddr)
 
-			// Shallow check: DNS Response bit (QR=1)
-			// DNS Header: ID(2), Flags(2)... Flags first byte bit 7 is QR.
-			if (buf[2] & 0x80) == 0 {
-				// Not a response, we are a client, we only care about responses.
-				c.udpBufferPool.Put(buf)
-				continue
-			}
-
-			packetData := buf[:n]
+			// Buffer swap: hand off current buffer downstream and get a fresh one.
+			// asyncProcessorWorker returns it via udpBufferPool.Put(pkt.data[:cap(pkt.data)]).
+			msgs[i].Buffers[0] = c.getRuntimeUDPBuffer()
 
 			select {
-			case c.rxChannel <- asyncReadPacket{data: packetData, addr: addr, localAddr: localAddr}:
+			case c.rxChannel <- asyncReadPacket{data: buf[:msgLen], addr: addr, localAddr: localAddr}:
 			default:
-				// Queue full! Drop packet and RECYCLE buffer.
-				c.udpBufferPool.Put(buf)
+				// Queue full — return the handed-off buffer immediately.
+				c.putRuntimeUDPBuffer(buf)
 				c.onRXDrop(addr)
 			}
 		}

@@ -14,7 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/ipv4"
+
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/netutil"
 )
 
 func (s *Server) configureSocketBuffers(conn *net.UDPConn) {
@@ -37,12 +40,12 @@ func (s *Server) startDNSWorkers(ctx context.Context, conn *net.UDPConn, reqCh <
 	}
 }
 
-func (s *Server) startReaders(ctx context.Context, conn *net.UDPConn, reqCh chan<- request, readErrCh chan<- error, readerWG *sync.WaitGroup) {
+func (s *Server) startReaders(ctx context.Context, pc netutil.BatchConn, conn *net.UDPConn, reqCh chan<- request, readErrCh chan<- error, readerWG *sync.WaitGroup) {
 	for i := range s.cfg.EffectiveUDPReaders() {
 		readerWG.Add(1)
 		go func(readerID int) {
 			defer readerWG.Done()
-			if err := s.readLoop(ctx, conn, reqCh, readerID); err != nil {
+			if err := s.readLoop(ctx, pc, reqCh, readerID); err != nil {
 				select {
 				case readErrCh <- err:
 				default:
@@ -113,17 +116,29 @@ func (s *Server) deferredIdleCleanupTimeout(cleanupInterval time.Duration, sessi
 	return idle
 }
 
-func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- request, readerID int) error {
-	for {
-		buffer := s.packetPool.Get().([]byte)
-		n, addr, err := conn.ReadFromUDP(buffer)
-		if err != nil {
-			s.packetPool.Put(buffer)
+func (s *Server) readLoop(ctx context.Context, pc netutil.BatchConn, reqCh chan<- request, readerID int) error {
+	batchSz := s.cfg.EffectiveUDPBatchSize()
 
+	// Pre-allocate goroutine-local batch with packetPool buffers — never shared.
+	msgs := make([]ipv4.Message, batchSz)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{s.packetPool.Get().([]byte)}
+	}
+	defer func() {
+		for i := range msgs {
+			if len(msgs[i].Buffers) > 0 && msgs[i].Buffers[0] != nil {
+				s.packetPool.Put(msgs[i].Buffers[0])
+				msgs[i].Buffers[0] = nil
+			}
+		}
+	}()
+
+	for {
+		n, err := pc.ReadBatch(msgs, 0)
+		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-
 			s.log.Debugf(
 				"\U0001F4A5 <yellow>UDP Read Error, Reader: <cyan>%d</cyan>, Error: <cyan>%v</cyan></yellow>",
 				readerID,
@@ -132,14 +147,26 @@ func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- r
 			return err
 		}
 
-		select {
-		case reqCh <- request{buf: buffer, size: n, addr: addr}:
-		case <-ctx.Done():
-			s.packetPool.Put(buffer)
-			return nil
-		default:
-			s.packetPool.Put(buffer)
-			s.onDrop(addr, len(reqCh), cap(reqCh))
+		for i := 0; i < n; i++ {
+			msgLen := msgs[i].N
+			msgs[i].N = 0
+			buffer := msgs[i].Buffers[0]
+
+			addr, _ := msgs[i].Addr.(*net.UDPAddr)
+			// Swap: pre-fill slot with a fresh pool buffer for the next ReadBatch.
+			msgs[i].Buffers[0] = s.packetPool.Get().([]byte)
+
+			select {
+			case reqCh <- request{buf: buffer, size: msgLen, addr: addr}:
+			case <-ctx.Done():
+				s.packetPool.Put(buffer)
+				s.packetPool.Put(msgs[i].Buffers[0])
+				msgs[i].Buffers[0] = nil
+				return nil
+			default:
+				s.packetPool.Put(buffer)
+				s.onDrop(addr, len(reqCh), cap(reqCh))
+			}
 		}
 	}
 }

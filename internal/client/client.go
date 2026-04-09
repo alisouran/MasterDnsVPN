@@ -99,6 +99,7 @@ type Client struct {
 	tunnelRX_TX_Workers  int
 	tunnelProcessWorkers int
 	tunnelPacketTimeout  time.Duration
+	udpBatchSize         int
 
 	// Local Proxy Daemons
 	tcpListener *TCPListener
@@ -244,6 +245,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		tunnelRX_TX_Workers:     cfg.RX_TX_Workers,
 		tunnelProcessWorkers:    cfg.TunnelProcessWorkers,
 		tunnelPacketTimeout:     time.Duration(cfg.TunnelPacketTimeoutSec * float64(time.Second)),
+		udpBatchSize:            cfg.EffectiveUDPBatchSize(),
 		plannerQueue:            make(chan plannerTask, max(24, cfg.RX_TX_Workers*24)),
 		encodedTXChannel:        make(chan writerTask, max(24, cfg.RX_TX_Workers*24)),
 		rxChannel:               make(chan asyncReadPacket, cfg.EffectiveRXChannelSize()),
@@ -281,6 +283,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		cfg.AutoDisableTimeoutServers,
 		time.Duration(cfg.AutoDisableTimeoutWindowSeconds*float64(time.Second)),
 	)
+	c.balancer.SetUCB1Config(cfg.UCB1ExplorationConstant)
 	c.pingManager = newPingManager(c)
 	return c
 }
