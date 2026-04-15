@@ -1,0 +1,184 @@
+# ==============================================================================
+# MasterDnsVPN — Iran VPS Client Config (1 core / 1 GB RAM)
+# Tuned for: censored/lossy Iran network, phone connects via SOCKS5 over internet.
+# Deploy: copy to client_config.toml on the Iran VPS.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1) Tunnel Identity & Security
+# ------------------------------------------------------------------------------
+
+# Must match server DOMAIN exactly.
+DOMAINS = ["v.your-domain.com"]
+
+# XOR (1) for maximum throughput. Switch to ChaCha20 (2) for real encryption
+# at near-zero throughput cost — the Iran→Germany DNS RTT is the bottleneck.
+DATA_ENCRYPTION_METHOD = 1
+
+# Paste the contents of encrypt_key.txt from the Germany VPS here.
+ENCRYPTION_KEY = ""
+
+# ------------------------------------------------------------------------------
+# 2) Local Proxy Listener
+# ------------------------------------------------------------------------------
+
+PROTOCOL_TYPE = "SOCKS5"
+
+# 0.0.0.0 — your phone connects over the internet, not localhost.
+LISTEN_IP = "0.0.0.0"
+LISTEN_PORT = 18000
+
+# MANDATORY when binding 0.0.0.0 — do not leave this false.
+SOCKS5_AUTH = true
+SOCKS5_USER = "CHANGE_ME_TO_SOMETHING_RANDOM"
+SOCKS5_PASS = "CHANGE_ME_TO_SOMETHING_LONG_AND_RANDOM"
+
+# ------------------------------------------------------------------------------
+# 3) Local DNS Service
+# ------------------------------------------------------------------------------
+
+# Disabled — your phone's SOCKS client sends DNS through the SOCKS proxy.
+# Running a local DNS server adds CPU/RAM for no gain on a 1-core VPS.
+LOCAL_DNS_ENABLED = false
+LOCAL_DNS_IP = "127.0.0.1"
+LOCAL_DNS_PORT = 53
+
+LOCAL_DNS_CACHE_MAX_RECORDS = 2000
+LOCAL_DNS_CACHE_TTL_SECONDS = 14400.0
+LOCAL_DNS_PENDING_TIMEOUT_SECONDS = 300.0
+DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS = 60.0
+LOCAL_DNS_CACHE_PERSIST_TO_FILE = true
+LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
+
+# Predictive prefetching — disabled on 1-core to save CPU.
+# Only useful when LOCAL_DNS_ENABLED = true.
+PREDICTIVE_PREFETCH_ENABLED = false
+PREDICTIVE_PREFETCH_WORKERS = 2
+
+# ------------------------------------------------------------------------------
+# 4) Resolver Selection, Duplication, and Health
+# ------------------------------------------------------------------------------
+
+# Strategy 6 = Loss Then Latency:
+# Shortlists resolvers by lowest packet loss first (filters blocked/censored ones),
+# then picks by latency among the best, then rotates near the top.
+# Best for Iran where many resolvers are blocked or DPI-throttled.
+# Alternative: 5 = Hybrid Score (loss-first + latency-aware combined score).
+RESOLVER_BALANCING_STRATEGY = 6
+
+# Iran links are lossy — 2× duplication is a good baseline.
+PACKET_DUPLICATION_COUNT = 2
+# 3× for setup packets (SOCKS5_SYN) — more important to get through first time.
+SETUP_PACKET_DUPLICATION_COUNT = 3
+
+STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD = 2
+STREAM_RESOLVER_FAILOVER_COOLDOWN = 2.5
+RECHECK_INACTIVE_SERVERS_ENABLED = true
+AUTO_DISABLE_TIMEOUT_SERVERS = true
+AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 30.0
+BASE_ENCODE_DATA = false
+
+# ------------------------------------------------------------------------------
+# 5) Compression
+# ------------------------------------------------------------------------------
+
+# OFF on 1-core — DNS tunnel overhead is per-packet, not per-byte.
+# CPU cost of ZSTD/LZ4 exceeds the saved bytes over DNS.
+UPLOAD_COMPRESSION_TYPE = 0
+DOWNLOAD_COMPRESSION_TYPE = 0
+COMPRESSION_MIN_SIZE = 120
+
+# ------------------------------------------------------------------------------
+# 6) MTU Discovery
+# ------------------------------------------------------------------------------
+
+MIN_UPLOAD_MTU = 38
+MIN_DOWNLOAD_MTU = 100
+MAX_UPLOAD_MTU = 150
+MAX_DOWNLOAD_MTU = 500
+
+# 3 retries — lossy Iran path means first probes can be lost.
+MTU_TEST_RETRIES = 3
+MTU_TEST_TIMEOUT = 3.0
+# 32 parallel probes at startup: short burst, fine even on 1 core.
+MTU_TEST_PARALLELISM = 32
+
+# Export working resolvers to a file — required for the 3-hour scan+restart script.
+SAVE_MTU_SERVERS_TO_FILE = true
+# Stable filename (no {time}) so the scan script can reliably read it.
+MTU_SERVERS_FILE_NAME = "masterdnsvpn_success_test.log"
+# One plain IP per line — the scan script expects this format.
+MTU_SERVERS_FILE_FORMAT = "{IP}"
+MTU_USING_SECTION_SEPARATOR_TEXT = ""
+MTU_REMOVED_SERVER_LOG_FORMAT = "Resolver {IP} removed at {TIME} due to {CAUSE}"
+MTU_ADDED_SERVER_LOG_FORMAT = "Resolver {IP} added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"
+MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT = "Resolver {IP} added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"
+
+# ------------------------------------------------------------------------------
+# 7) Runtime Workers, Queues, and Timers
+# ------------------------------------------------------------------------------
+
+# 1 core — 2 readers/writers and 3 processors. More would just context-switch.
+# If your VPS swaps at runtime, drop these further (1 / 2).
+RX_TX_WORKERS = 2
+TUNNEL_PROCESS_WORKERS = 3
+
+TUNNEL_PACKET_TIMEOUT_SECONDS = 10.0
+DISPATCHER_IDLE_POLL_INTERVAL_SECONDS = 0.020
+
+# Halved from default 4096 — saves ~100 MB RAM on a 1 GB box.
+RX_CHANNEL_SIZE = 2048
+
+# UDP batch size — 32 is sensible for a 1-core box.
+UDP_BATCH_SIZE = 32
+
+SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS = 30.0
+CLIENT_TERMINAL_STREAM_RETENTION_SECONDS = 30.0
+CLIENT_CANCELLED_SETUP_RETENTION_SECONDS = 60.0
+
+SESSION_INIT_RETRY_BASE_SECONDS = 1.0
+SESSION_INIT_RETRY_STEP_SECONDS = 1.0
+SESSION_INIT_RETRY_LINEAR_AFTER = 5
+SESSION_INIT_RETRY_MAX_SECONDS = 60.0
+SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS = 60.0
+# 3 racing inits — improves first-connect reliability on censored networks.
+SESSION_INIT_RACING_COUNT = 3
+
+PING_AGGRESSIVE_INTERVAL_SECONDS = 0.100
+PING_LAZY_INTERVAL_SECONDS = 0.750
+PING_COOLDOWN_INTERVAL_SECONDS = 2.0
+PING_COLD_INTERVAL_SECONDS = 15.0
+PING_WARM_THRESHOLD_SECONDS = 8.0
+PING_COOL_THRESHOLD_SECONDS = 20.0
+PING_COLD_THRESHOLD_SECONDS = 30.0
+
+# ------------------------------------------------------------------------------
+# 8) ARQ Reliability & Packing
+# ------------------------------------------------------------------------------
+
+# 12 control blocks per batch — more packing, fewer round-trips on high-RTT links.
+MAX_PACKETS_PER_BATCH = 12
+
+# Larger ARQ window for intercontinental Iran→Germany RTT.
+ARQ_WINDOW_SIZE = 1000
+ARQ_INITIAL_RTO_SECONDS = 1.0
+ARQ_MAX_RTO_SECONDS = 5.0
+ARQ_CONTROL_INITIAL_RTO_SECONDS = 0.5
+ARQ_CONTROL_MAX_RTO_SECONDS = 3.0
+ARQ_MAX_CONTROL_RETRIES = 400
+ARQ_INACTIVITY_TIMEOUT_SECONDS = 1800.0
+ARQ_DATA_PACKET_TTL_SECONDS = 2400.0
+ARQ_CONTROL_PACKET_TTL_SECONDS = 1200.0
+ARQ_MAX_DATA_RETRIES = 1200
+ARQ_DATA_NACK_MAX_GAP = 16
+ARQ_DATA_NACK_INITIAL_DELAY_SECONDS = 0.1
+ARQ_DATA_NACK_REPEAT_SECONDS = 1.0
+ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS = 120.0
+ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0
+
+# ------------------------------------------------------------------------------
+# 9) Logging
+# ------------------------------------------------------------------------------
+
+# WARN: less disk I/O on a small VPS. Bump to INFO when diagnosing issues.
+LOG_LEVEL = "WARN"
