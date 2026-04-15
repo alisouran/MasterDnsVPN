@@ -2,6 +2,9 @@ name: Build and Release (Go)
 
 on:
   workflow_dispatch: {}
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -28,10 +31,15 @@ jobs:
       - name: Generate Release Tag
         id: get_tag
         run: |
-          SHORT_SHA=$(echo ${GITHUB_SHA} | cut -c1-7)
-          TS=$(date -u +%Y.%m.%d.%H%M%S)
-          echo "tag=v${TS}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "Generated Tag: v${TS}-${SHORT_SHA}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            SHORT_SHA=$(echo ${GITHUB_SHA} | cut -c1-7)
+            TS=$(date -u +%Y.%m.%d.%H%M%S)
+            TAG="v${TS}-${SHORT_SHA}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Generated Tag: ${TAG}"
 
   build:
     name: Build (matrix)
